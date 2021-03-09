@@ -2,10 +2,15 @@
 """
 import web
 from datetime import datetime
-import simplejson
 import re
 
+import six
 from six.moves.urllib.parse import urlsplit
+
+if six.PY2:  # See #4525 json.dump(indent) MUST be an int on PY2
+    import simplejson as json
+else:
+    import json
 
 import babel
 import babel.core
@@ -23,8 +28,6 @@ try:
 except ImportError:
     BeautifulSoup = None
 
-import six
-
 from infogami import config
 
 # handy utility to parse ISO date strings
@@ -32,13 +35,13 @@ from infogami.infobase.utils import parse_datetime
 from infogami.utils.view import safeint
 
 # TODO: i18n should be moved to core or infogami
-from openlibrary.i18n import gettext as _
+from openlibrary.i18n import gettext as _  # noqa: F401
 
 __all__ = [
     "sanitize",
     "json_encode",
     "safesort",
-    "datestr", "format_date",
+    "days_since", "datestr", "format_date",
     "sprintf", "cond", "commify", "truncate", "datetimestr_utc",
     "urlsafe", "texsafe",
     "percentage", "affiliate_id", "bookreader_host",
@@ -96,9 +99,9 @@ def sanitize(html, encoding='utf8'):
 
 
 def json_encode(d, **kw):
-    """Same as simplejson.dumps.
+    """Same as json.dumps.
     """
-    return simplejson.dumps(d, **kw)
+    return json.dumps(d, **kw)
 
 
 def safesort(iterable, key=None, reverse=False):
@@ -114,17 +117,23 @@ def safesort(iterable, key=None, reverse=False):
         return (k.__class__.__name__, k)
     return sorted(iterable, key=safekey, reverse=reverse)
 
+
+def days_since(then, now=None):
+    delta = then - (now or datetime.now())
+    return abs(delta.days)
+
+
 def datestr(then, now=None, lang=None, relative=True):
     """Internationalized version of web.datestr."""
-    lang = lang or web.ctx.get('lang') or "en"
+    lang = lang or web.ctx.lang
     if relative:
         if now is None:
             now = datetime.now()
         delta = then - now
-        if abs(delta.days) < 4: # Threshold from web.py
-            return babel.dates.format_timedelta(delta,
-                                                add_direction=True,
-                                                locale=_get_babel_locale(lang))
+        if abs(delta.days) < 4:  # Threshold from web.py
+            return babel.dates.format_timedelta(
+                delta, add_direction=True, locale=_get_babel_locale(lang)
+            )
     return format_date(then, lang=lang)
 
 
@@ -132,7 +141,7 @@ def datetimestr_utc(then):
     return then.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 def format_date(date, lang=None):
-    lang = lang or web.ctx.get('lang') or "en"
+    lang = lang or web.ctx.lang
     locale = _get_babel_locale(lang)
     return babel.dates.format_date(date, format="long", locale=locale)
 

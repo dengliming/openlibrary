@@ -3,13 +3,13 @@ import '../../../../static/css/components/carousel--js.less';
 import Carousel from './carousel/Carousel';
 
 export function initCarouselsPartials() {
-    $('.loadingIndicator').removeClass('hidden');
-    jQuery(window).load(function () {
+
+    let fetchRelatedWorks = function() {
         $.ajax({
             url: '/partials',
             type: 'GET',
             data: {
-                workid: $('.RelatedWorksCarousel').attr('workId'),
+                workid: $('.RelatedWorksCarousel').data('workid'),
                 _component: 'RelatedWorkCarousel'
             },
             datatype: 'json',
@@ -29,5 +29,9 @@ export function initCarouselsPartials() {
                 }
             }
         });
-    });
+    };
+
+    $('.loadingIndicator').removeClass('hidden');
+
+    fetchRelatedWorks();
 }

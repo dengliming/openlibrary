@@ -1,9 +1,7 @@
 """Handlers for adding and editing books."""
 
 import web
-import simplejson
-from collections import defaultdict
-from six import StringIO
+import json
 import csv
 import datetime
 
@@ -567,7 +565,7 @@ class SaveBookHelper:
     def process_new_fields(self, formdata):
         def f(name):
             val = formdata.get(name)
-            return val and simplejson.loads(val)
+            return val and json.loads(val)
 
         new_roles = f('select-role-json')
         new_ids = f('select-id-json')
@@ -639,15 +637,28 @@ class SaveBookHelper:
         :rtype: web.storage
         """
         def read_subject(subjects):
+            """
+            >>> list(read_subject("A,B,C,B")) == [u'A', u'B', u'C']   # str
+            True
+            >>> list(read_subject(r"A,B,C,B")) == [u'A', u'B', u'C']  # raw
+            True
+            >>> list(read_subject(u"A,B,C,B")) == [u'A', u'B', u'C']  # Unicode
+            True
+            >>> list(read_subject(""))
+            []
+            """
             if not subjects:
                 return
-
+            if six.PY2:
+                subjects = subjects.encode('utf-8')  # no unicode in csv module
+            f = six.StringIO(subjects)
             dedup = set()
-            with StringIO(subjects) as f:
-                for s in next(csv.reader(f, dialect='excel', skipinitialspace=True)):
-                    if s.lower() not in dedup:
-                        yield s
-                        dedup.add(s.lower())
+            for s in next(csv.reader(f, dialect='excel', skipinitialspace=True)):
+                if six.PY2:
+                    s = s.decode('utf-8')
+                if s.lower() not in dedup:
+                    yield s
+                    dedup.add(s.lower())
 
         work.subjects = list(read_subject(work.get('subjects', '')))
         work.subject_places = list(read_subject(work.get('subject_places', '')))
@@ -722,17 +733,8 @@ class book_edit(delegate.page):
         if edition is None:
             raise web.notfound()
 
-        work = edition.works and edition.works[0]
-
-        if not work:
-            # HACK: create dummy work when work is not available
-            work = web.ctx.site.new('', {
-                'key': '',
-                'type': {'key': '/type/work'},
-                'title': edition.title,
-                'authors': [{'type': {'key': '/type/author_role'}, 'author': {'key': a['key']}} for a in edition.get('authors', [])],
-                'subjects': edition.get('subjects', []),
-            })
+        work = (edition.works and edition.works[0] or
+                edition.make_work_from_orphaned_edition())
 
         return render_template('books/edit', work, edition, recaptcha=get_recaptcha())
 
@@ -771,7 +773,7 @@ class book_edit(delegate.page):
             else:
                 add_flash_message("info", utils.get_message("flash_book_updated"))
 
-            raise web.seeother(edition.url())
+            raise web.seeother(urllib.parse.quote(edition.url()))
         except ClientException as e:
             add_flash_message('error', e.args[-1] or e.json)
             return self.GET(key)
@@ -873,20 +875,6 @@ class author_edit(delegate.page):
             return author
 
 
-class edit(core.edit):
-    """Overwrite ?m=edit behaviour for author, book and work pages."""
-    def GET(self, key):
-        page = web.ctx.site.get(key)
-
-        if web.re_compile('/(authors|books|works)/OL.*').match(key):
-            if page is None:
-                raise web.seeother(key)
-            else:
-                raise web.seeother(page.url(suffix="/edit"))
-        else:
-            return core.edit.GET(self, key)
-
-
 class daisy(delegate.page):
     path = "(/books/.*)/daisy"
 
@@ -901,7 +889,7 @@ class daisy(delegate.page):
 
 def to_json(d):
     web.header('Content-Type', 'application/json')
-    return delegate.RawText(simplejson.dumps(d))
+    return delegate.RawText(json.dumps(d))
 
 
 class languages_autocomplete(delegate.page):
@@ -924,7 +912,8 @@ class works_autocomplete(delegate.page):
         solr = get_solr()
 
         q = solr.escape(i.q).strip()
-        if is_work_olid(q.upper()):
+        query_is_key = is_work_olid(q.upper())
+        if query_is_key:
             # ensure uppercase; key is case sensitive in solr
             solr_q = 'key:"/works/%s"' % q.upper()
         else:
@@ -943,12 +932,20 @@ class works_autocomplete(delegate.page):
         # exclude fake works that actually have an edition key
         docs = [d for d in data['docs'] if d['key'][-1] == 'W']
 
+        if query_is_key and not docs:
+            # Grumble! Work not in solr yet. Create a dummy.
+            key = '/works/%s' % q.upper()
+            work = web.ctx.site.get(key)
+            if work:
+                docs = [work.as_fake_solr_record()]
+
         for d in docs:
             # Required by the frontend
             d['name'] = d['key'].split('/')[-1]
             d['full_title'] = d['title']
             if 'subtitle' in d:
                 d['full_title'] += ": " + d['subtitle']
+
         return to_json(docs)
 
 class authors_autocomplete(delegate.page):
@@ -961,8 +958,8 @@ class authors_autocomplete(delegate.page):
         solr = get_solr()
 
         q = solr.escape(i.q).strip()
-        solr_q = ''
-        if is_author_olid(q.upper()):
+        query_is_key = is_author_olid(q.upper())
+        if query_is_key:
             # ensure uppercase; key is case sensitive in solr
             solr_q = 'key:"/authors/%s"' % q.upper()
         else:
@@ -978,6 +975,13 @@ class authors_autocomplete(delegate.page):
 
         data = solr.select(solr_q, **params)
         docs = data['docs']
+
+        if query_is_key and not docs:
+            # Grumble! Must be a new author. Fetch from db, and build a "fake" solr resp
+            key = '/authors/%s' % q.upper()
+            author = web.ctx.site.get(key)
+            if author:
+                docs = [author.as_fake_solr_record()]
 
         for d in docs:
             if 'top_work' in d:

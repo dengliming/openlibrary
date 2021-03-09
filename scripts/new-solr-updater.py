@@ -94,6 +94,18 @@ class InfobaseLog:
             # no more data is available
             if not data:
                 logger.debug("no more records found")
+                # There's an infobase bug where we'll sometimes get 0 items, but the
+                # binary offset will have incremented...?
+                if 'offset' in d:
+                    # There's _another_ infobase bug where if you query a future date,
+                    # it'll return back 2020-12-01. To avoid solrupdater getting stuck
+                    # in a loop, only update the offset if it's newer than the current
+                    old_day, old_boffset = self.offset.split(':')
+                    old_boffset = int(old_boffset)
+                    new_day, new_boffset = d['offset'].split(':')
+                    new_boffset = int(new_boffset)
+                    if new_day >= old_day and new_boffset >= old_boffset:
+                        self.offset = d['offset']
                 return
 
             for record in data:
@@ -222,12 +234,12 @@ class Solr:
 
 def process_args(args):
     if args.debugger:
-        import ptvsd
+        import debugpy
 
         logger.info("Enabling debugger attachment (attach if it hangs here)")
-        ptvsd.enable_attach(address=('0.0.0.0', 3000))
+        debugpy.listen(address=('0.0.0.0', 3000))
         logger.info("Waiting for debugger to attach...")
-        ptvsd.wait_for_attach()
+        debugpy.wait_for_client()
         logger.info("Debugger attached to port 3000")
 
     # Sometimes archive.org requests blocks forever.

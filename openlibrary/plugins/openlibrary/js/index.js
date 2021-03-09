@@ -1,14 +1,14 @@
 import 'jquery';
 import 'jquery-migrate';
 import 'jquery-validation';
-// npm jquery-ui@1.12.1 package does not match the one we have here, so for now we load from vendor
-import '../../../../vendor/js/jquery-ui/jquery-ui-1.12.1.min.js';
+import 'jquery-ui/ui/widgets/dialog';
+import 'jquery-ui/ui/widgets/sortable';
+import 'jquery-ui/ui/widgets/tabs';
+import 'jquery-ui/ui/widgets/autocomplete';
 // For dialog boxes (e.g. add to list)
 import '../../../../vendor/js/colorbox/1.5.14.js';
 // jquery.form#2.36 not on npm, no longer getting worked on
 import '../../../../vendor/js/jquery-form/jquery.form.js';
-// jquery-autocomplete#1.1 with modified
-import '../../../../vendor/js/jquery-autocomplete/jquery.autocomplete-modified.js';
 import autocompleteInit from './autocomplete';
 // Used only by the openlibrary/templates/books/edit/addfield.html template
 import addNewFieldInit from './add_new_field';
@@ -116,7 +116,13 @@ jQuery(function () {
     // Enable any carousels in the page
     if ($carouselElements.length) {
         import(/* webpackChunkName: "carousel" */ './carousel')
-            .then((module) => module.init($carouselElements));
+            .then((module) => { module.init($carouselElements);
+                $('.slick-slide').each(function () {
+                    if ($(this).attr('aria-describedby') != undefined) {
+                        $(this).attr('id',$(this).attr('aria-describedby'));
+                    }
+                });
+            })
     }
     if ($('script[type="text/json+graph"]').length > 0) {
         import(/* webpackChunkName: "graphs" */ './graphs')
@@ -128,7 +134,48 @@ jQuery(function () {
             .then(module => module.init(window.READINGLOG_STATS_CONFIG));
     }
 
+    const pageEl = $('#page-barcodescanner');
+    if (pageEl.length) {
+        import(/* webpackChunkName: "page-barcodescanner" */ './page-barcodescanner')
+            .then((module) => module.init());
+    }
+
+    if (document.getElementById('modal-link')) {
+        import(/* webpackChunkName: "patron_metadata" */ './patron-metadata')
+            .then((module) => module.initPatronMetadata());
+    }
+
+    if (document.getElementById('excerpts')) {
+        import (/* webpackChunkName: "books_edit" */ './edit.js')
+            .then((module) => module.initEdit());
+    }
+    if (document.getElementsByClassName('imageIntro').length) {
+        import(/* webpackChunkName: "book_cover_manage" */ './cover_add_manage')
+            .then(module => module.initAddCoverImport());
+    }
+
+    if ($('#cboxPrevious').length) {
+        $('#cboxPrevious').attr({'aria-label': 'Previous button', 'aria-hidden': 'true'});
+    }
+    if ($('#cboxNext').length) {
+        $('#cboxNext').attr({'aria-label': 'Next button', 'aria-hidden': 'true'});
+    }
+    if ($('#cboxSlideshow').length) {
+        $('#cboxSlideshow').attr({'aria-label': 'Slideshow button', 'aria-hidden': 'true'});
+    }
+
     $(document).on('click', '.slide-toggle', function () {
         $(`#${$(this).attr('aria-controls')}`).slideToggle();
+    });
+
+    $('#wikiselect').on('focus', function(){$(this).select();})
+
+    // Clicking outside of menus closes menus
+    $(document).on('click', function (event) {
+        const $openMenus = $('.checkbox-menu :checked').parents('.checkbox-menu');
+        $openMenus
+            .filter((_, menu) => !$(event.target).closest(menu).length)
+            .find('[type=checkbox]')
+            .removeAttr('checked');
     });
 });

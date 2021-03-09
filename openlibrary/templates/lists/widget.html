@@ -140,6 +140,7 @@ $jsdef render_widget_add(lists, work_key, edition_key, users_work_read_status, u
                 $if edition_key:
                   <input type="hidden" id="edition_id" name="edition_id" value="$(edition_key)"/>
               </form>
+
               $if users_work_read_status:
                 <a href="javascript:;" class="dropclick dropclick-activated">
                   <div class="arrow arrow-activated"></div>
@@ -278,8 +279,12 @@ $if include_widget:
             </div>
         </div>
     </div>
-  $if include_rating:
-    $:macros.StarRatings(work, edition)
+  $if work:
+    $if include_rating:
+      $:macros.StarRatings(work, edition)
+
+    $if ctx.user and ctx.user.is_beta_tester():
+      $:macros.UserMetadata(work, edition)
 
 
 $if include_showcase:

@@ -1,21 +1,27 @@
 from __future__ import print_function
-import web
-import simplejson
-import os
-import datetime
-import time
-import logging
-import array
-import memcache
 
-from six.moves.urllib.request import urlopen
+import array
+import datetime
+import json
+import logging
+import os
+
+import memcache
+import requests
+import web
 
 from openlibrary.coverstore import config, db, ratelimit
-from openlibrary.coverstore.coverlib import save_image, read_image, read_file
-from openlibrary.coverstore.utils import safeint, rm_f, random_string, ol_things, ol_get, changequery, download
-
-from six.moves import urllib
-
+from openlibrary.coverstore.coverlib import read_file, read_image, save_image
+from openlibrary.coverstore.utils import (
+    changequery,
+    download,
+    ol_get,
+    ol_things,
+    random_string,
+    rm_f,
+    safeint,
+)
+from openlibrary.plugins.openlibrary.processors import CORSProcessor
 
 logger = logging.getLogger("coverstore")
 
@@ -32,20 +38,20 @@ urls = (
 )
 app = web.application(urls, locals())
 
+app.add_processor(CORSProcessor())
+
+
 def get_cover_id(olkeys):
     """Return the first cover from the list of ol keys."""
     for olkey in olkeys:
         doc = ol_get(olkey)
         if not doc:
             continue
-
-        if doc['key'].startswith("/authors"):
-            covers = doc.get('photos', [])
-        else:
-            covers = doc.get('covers', [])
-
-        # Sometimes covers is stored as [-1] to indicate no covers. Consider it as no covers.
-        if covers and covers[0] >= 0:
+        is_author = doc['key'].startswith("/authors")
+        covers = doc.get('photos' if is_author else 'covers', [])
+        # Sometimes covers is stored as [None] or [-1] to indicate no covers.
+        # If so, consider there are no covers.
+        if covers and (covers[0] or -1) >= 0:
             return covers[0]
 
 def _query(category, key, value):
@@ -128,7 +134,8 @@ class upload2:
             (code, msg) = code__msg
             _cleanup()
             e = web.badrequest()
-            e.data = simplejson.dumps({"code": code, "message": msg})
+            e.data = json.dumps({"code": code, "message": msg})
+            logger.exception("upload2.POST() failed: " + e.data)
             raise e
 
         source_url = i.source_url
@@ -149,44 +156,17 @@ class upload2:
             error(ERROR_BAD_IMAGE)
 
         _cleanup()
-        return simplejson.dumps({"ok": "true", "id": d.id})
+        return json.dumps({"ok": "true", "id": d.id})
 
 def trim_microsecond(date):
     # ignore microseconds
     return datetime.datetime(*date.timetuple()[:6])
 
 
-@web.memoize
-def get_memcache():
-    servers = config.get("memcache_servers")
-    return memcache.Client(servers)
-
-def _locate_item(item):
-    """Locates the archive.org item in the cluster and returns the server and directory.
-    """
-    print(time.asctime(), "_locate_item", item, file=web.debug)
-    text = urlopen("https://archive.org/metadata/" + item).read()
-    d = simplejson.loads(text)
-    return d['server'], d['dir']
-
-def locate_item(item):
-    mc = get_memcache()
-    if not mc:
-        return _locate_item(item)
-    else:
-        x = mc.get(item)
-        if not x:
-            x = _locate_item(item)
-            print(time.asctime(), "mc.set", item, x, file=web.debug)
-            mc.set(item, x, time=600) # cache it for 10 minutes
-        return x
-
 def zipview_url(item, zipfile, filename):
-    server, dir = locate_item(item)
-
     # http or https
     protocol = web.ctx.protocol
-    return "%(protocol)s://%(server)s/zipview.php?zip=%(dir)s/%(zipfile)s&file=%(filename)s" % locals()
+    return "%(protocol)s://archive.org/download/%(item)s/%(zipfile)s/%(filename)s" % locals()
 
 # Number of images stored in one archive.org item
 IMAGES_PER_ITEM = 10000
@@ -279,8 +259,7 @@ class cover:
     def get_ia_cover_url(self, identifier, size="M"):
         url = "https://archive.org/metadata/%s/metadata" % identifier
         try:
-            jsontext = urlopen(url).read()
-            d = simplejson.loads(jsontext).get("result", {})
+            d = requests.get(url).json().get("result", {})
         except (IOError, ValueError):
             return
 
@@ -389,7 +368,7 @@ class cover_details:
                 if isinstance(d['created'], datetime.datetime):
                     d['created'] = d['created'].isoformat()
                     d['last_modified'] = d['last_modified'].isoformat()
-                return simplejson.dumps(d)
+                return json.dumps(d)
             else:
                 raise web.notfound("")
         else:
@@ -430,12 +409,12 @@ class query:
                 }
             result = [process(r) for r in result]
 
-        json = simplejson.dumps(result)
+        json_data = json.dumps(result)
         web.header('Content-Type', 'text/javascript')
         if i.callback:
-            return "%s(%s);" % (i.callback, json)
+            return "%s(%s);" % (i.callback, json_data)
         else:
-           return json
+            return json_data
 
 class touch:
     def POST(self, category):

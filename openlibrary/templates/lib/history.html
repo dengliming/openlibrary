@@ -1,8 +1,9 @@
 $def with (page)
 
+$ h = None
 $if "superfast" in ctx.features and "history_v2" not in ctx.features:
     $ h = page.get_history_preview()
-$else:
+$if not h:
     $ h = get_history(page)
 
 $ versions = h.recent + h.initial
@@ -63,14 +64,6 @@ $ show_wikipedia_citation_link = page.wp_citation_fields
                         </form>
                     </div>
                 </div>
-
-                <script type="text/javascript">
-                <!--
-                window.q.push(function(){
-                    \$('#wikiselect').focus(function(){\$(this).select();})
-                });
-                //-->
-                </script>
     </div>
 
     <table class="history">

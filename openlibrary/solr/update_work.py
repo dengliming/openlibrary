@@ -1,15 +1,17 @@
 from __future__ import print_function
 import datetime
+import itertools
 import logging
 import os
 import re
 import requests
 import sys
 import time
+from six.moves.urllib.parse import urlparse
 from collections import defaultdict
 from unicodedata import normalize
 
-import simplejson as json
+import json
 import six
 from six.moves.http_client import HTTPConnection
 import web
@@ -39,7 +41,7 @@ re_year = re.compile(r'(\d{4})$')
 data_provider = None
 _ia_db = None
 
-solr_host = None
+solr_base_url = None
 
 
 def urlopen(url, params=None, data=None):
@@ -51,20 +53,21 @@ def urlopen(url, params=None, data=None):
     response = requests.post(url, params=params, data=data, headers=headers)
     return response
 
-def get_solr():
+def get_solr_base_url():
     """
     Get Solr host
 
     :rtype: str
     """
-    global solr_host
+    global solr_base_url
 
     load_config()
 
-    if not solr_host:
-        solr_host = config.runtime_config['plugin_worksearch']['solr']
+    if not solr_base_url:
+        solr_base_url = config.runtime_config['plugin_worksearch']['solr_base_url']
 
-    return solr_host
+    return solr_base_url
+
 
 def get_ia_collection_and_box_id(ia):
     """
@@ -167,28 +170,31 @@ def is_sine_nomine(pub):
     """
     return re_not_az.sub('', pub).lower() == 'sn'
 
-def pick_cover(w, editions):
+
+def pick_cover_edition(editions, work_cover_id):
     """
     Get edition that's used as the cover of the work. Otherwise get the first English edition, or otherwise any edition.
 
-    :param dict w:
     :param list[dict] editions:
-    :return: Edition key (ex: "/books/OL1M")
-    :rtype: str or None
+    :param int or None work_cover_id:
+    :rtype: dict or None
     """
-    w_cover = w['covers'][0] if w.get('covers', []) else None
-    first_with_cover = None
-    for e in editions:
-        if 'covers' not in e:
-            continue
-        if w_cover and e['covers'][0] == w_cover:
-            return e['key']
-        if not first_with_cover:
-            first_with_cover = e['key']
-        for l in e.get('languages', []):
-            if 'eng' in l:
-                return e['key']
-    return first_with_cover
+    editions_w_covers = [
+        ed
+        for ed in editions
+        if any(cover_id for cover_id in ed.get('covers', []) if cover_id != -1)
+    ]
+    return next(itertools.chain(
+        # Prefer edition with the same cover as the work first
+        (ed for ed in editions_w_covers if work_cover_id in ed.get('covers', [])),
+        # Then prefer English covers
+        (ed for ed in editions_w_covers if 'eng' in str(ed.get('languages', []))),
+        # Then prefer anything with a cover
+        editions_w_covers,
+        # The default: None
+        [None],
+    ))
+
 
 def get_work_subjects(w):
     """
@@ -513,31 +519,25 @@ class SolrProcessor:
                            for v in e[db_key])
             add_list(solr_key, values)
 
-        # Need this to enable in pytest, which have config.runtime_config = {}
-        conf = config.runtime_config or {
-            'plugin_worksearch': {
-                'has_classifications': True
-            }}
-        if conf.get('plugin_worksearch', {}).get('has_classifications', False):
-            raw_lccs = set(lcc
-                           for ed in editions
-                           for lcc in ed.get('lc_classifications', []))
-            lccs = set(lcc for lcc in map(short_lcc_to_sortable_lcc, raw_lccs) if lcc)
-            if lccs:
-                add_list("lcc", lccs)
-                # Choose the... idk, longest for sorting?
-                add("lcc_sort", sorted(lccs, key=len, reverse=True)[0])
+        raw_lccs = set(lcc
+                       for ed in editions
+                       for lcc in ed.get('lc_classifications', []))
+        lccs = set(lcc for lcc in map(short_lcc_to_sortable_lcc, raw_lccs) if lcc)
+        if lccs:
+            add_list("lcc", lccs)
+            # Choose the... idk, longest for sorting?
+            add("lcc_sort", sorted(lccs, key=len, reverse=True)[0])
 
-            raw_ddcs = set(ddc
-                           for ed in editions
-                           for ddc in ed.get('dewey_decimal_class', []))
-            ddcs = set(ddc
-                       for raw_ddc in raw_ddcs
-                       for ddc in normalize_ddc(raw_ddc))
-            if ddcs:
-                add_list("ddc", ddcs)
-                # Choose longest, since has most precision?
-                add("ddc_sort", sorted(ddcs, key=len, reverse=True)[0])
+        raw_ddcs = set(ddc
+                       for ed in editions
+                       for ddc in ed.get('dewey_decimal_class', []))
+        ddcs = set(ddc
+                   for raw_ddc in raw_ddcs
+                   for ddc in normalize_ddc(raw_ddc))
+        if ddcs:
+            add_list("ddc", ddcs)
+            # Choose longest, since has most precision?
+            add("ddc_sort", sorted(ddcs, key=len, reverse=True)[0])
 
         add_list("isbn", self.get_isbns(editions))
         add("last_modified_i", self.get_last_modified(w, editions))
@@ -752,13 +752,22 @@ def build_data2(w, editions, authors, ia, duplicates):
 
     doc = p.build_data(w, editions, subjects, has_fulltext)
 
-    cover_edition = pick_cover(w, editions)
+    work_cover_id = next(itertools.chain(
+        (cover_id for cover_id in w.get('covers', []) if cover_id != -1),
+        [None]
+    ))
+
+    cover_edition = pick_cover_edition(editions, work_cover_id)
     if cover_edition:
-        add_field(doc, 'cover_edition_key', re_edition_key.match(cover_edition).group(1))
-    if w.get('covers'):
-        cover = w['covers'][0]
-        assert isinstance(cover, int)
-        add_field(doc, 'cover_i', cover)
+        cover_edition_key = re_edition_key.match(cover_edition['key']).group(1)
+        add_field(doc, 'cover_edition_key', cover_edition_key)
+
+    main_cover_id = work_cover_id or (
+        next(cover_id for cover_id in cover_edition['covers'] if cover_id != -1)
+        if cover_edition else None)
+    if main_cover_id:
+        assert isinstance(main_cover_id, int)
+        add_field(doc, 'cover_i', main_cover_id)
 
     k = 'first_sentence'
     fs = set( e[k]['value'] if isinstance(e[k], dict) else e[k] for e in editions if e.get(k, None))
@@ -846,10 +855,14 @@ def solr_update(requests, debug=False, commitWithin=60000):
     :param bool debug:
     :param int commitWithin: Solr commitWithin, in ms
     """
-    h1 = HTTPConnection(get_solr())
-    url = 'http://%s/solr/update' % get_solr()
-
+    url = get_solr_base_url() + '/update'
+    parsed_url = urlparse(url)
+    if parsed_url.port:
+        h1 = HTTPConnection(parsed_url.hostname, parsed_url.port)
+    else:
+        h1 = HTTPConnection(parsed_url.hostname)
     logger.info("POSTing update to %s", url)
+    # FIXME; commit strategy / timing should be managed in config, not code
     url = url + "?commitWithin=%d" % commitWithin
 
     h1.connect()
@@ -1109,7 +1122,7 @@ def get_subject(key):
         'facet.mincount': 1,
         'facet.limit': 100
     }
-    base_url = 'http://' + get_solr() + '/solr/select'
+    base_url = get_solr_base_url() + '/select'
     result = urlopen(base_url, params).json()
 
     work_count = result['response']['numFound']
@@ -1241,14 +1254,20 @@ def update_author(akey, a=None, handle_redirects=True):
         raise
 
     facet_fields = ['subject', 'time', 'person', 'place']
-    base_url = 'http://' + get_solr() + '/solr/select'
+    base_url = get_solr_base_url() + '/select'
 
-    url = base_url + '?wt=json&json.nl=arrarr&q=author_key:%s&sort=edition_count+desc&rows=1&fl=title,subtitle&facet=true&facet.mincount=1' % author_id
-    url += ''.join('&facet.field=%s_facet' % f for f in facet_fields)
-
-    logger.info("urlopen %s", url)
-
-    reply = urlopen(url).json()
+    reply = requests.get(base_url, params=[
+        ('wt', 'json'),
+        ('json.nl', 'arrarr'),
+        ('q', 'author_key:%s' % author_id),
+        ('sort', 'edition_count desc'),
+        ('row', 1),
+        ('fl', 'title,subtitle'),
+        ('facet', 'true'),
+        ('facet.mincount', 1),
+    ] + [
+        ('facet.field', '%s_facet' % field) for field in facet_fields
+    ]).json()
     work_count = reply['response']['numFound']
     docs = reply['response'].get('docs', [])
     top_work = None
@@ -1282,7 +1301,7 @@ def update_author(akey, a=None, handle_redirects=True):
     d['work_count'] = work_count
     d['top_subjects'] = top_subjects
 
-    requests = []
+    solr_requests = []
     if handle_redirects:
         redirect_keys = data_provider.find_redirects(akey)
         #redirects = ''.join('<id>{}</id>'.format(k) for k in redirect_keys)
@@ -1293,11 +1312,11 @@ def update_author(akey, a=None, handle_redirects=True):
         #     logger.error('AssertionError: redirects: %r', [r['key'] for r in query_iter(q)])
         #     raise
         #if redirects:
-        #    requests.append('<delete>' + redirects + '</delete>')
+        #    solr_requests.append('<delete>' + redirects + '</delete>')
         if redirect_keys:
-            requests.append(DeleteRequest(redirect_keys))
-    requests.append(UpdateRequest(d))
-    return requests
+            solr_requests.append(DeleteRequest(redirect_keys))
+    solr_requests.append(UpdateRequest(d))
+    return solr_requests
 
 
 re_edition_key_basename = re.compile("^[a-zA-Z0-9:.-]+$")
@@ -1318,8 +1337,8 @@ def solr_select_work(edition_key):
 
     edition_key = solr_escape(edition_key)
 
-    url = 'http://%s/solr/select?wt=json&q=edition_key:%s&rows=1&fl=key' % (
-        get_solr(),
+    url = '%s/select?wt=json&q=edition_key:%s&rows=1&fl=key' % (
+        get_solr_base_url(),
         url_quote(edition_key)
     )
     reply = urlopen(url).json()

@@ -26,10 +26,8 @@ import logging
 
 from six.moves import urllib
 
-
 MARC_LENGTH_POS = 5
 logger = logging.getLogger('openlibrary.importapi')
-
 
 
 class DataError(ValueError):
@@ -55,17 +53,21 @@ def parse_meta_headers(edition_builder):
             meta_key = m.group(1).lower()
             edition_builder.add(meta_key, v, restrict_keys=False)
 
+
 def parse_data(data):
     """
     Takes POSTed data and determines the format, and returns an Edition record
     suitable for adding to OL.
 
-    :param str data: Raw data
+    :param bytes data: Raw data
     :rtype: (dict|None, str|None)
     :return: (Edition record, format (rdf|opds|marcxml|json|marc)) or (None, None)
+
+    from typing import Dict, Optional, Tuple
+    def parse_data(data: bytes) -> Tuple[Optional[Dict], Optional[str]]:
     """
     data = data.strip()
-    if -1 != data[:10].find('<?xml'):
+    if b'<?xml' in data[:10]:
         root = etree.fromstring(data)
         if '{http://www.w3.org/1999/02/22-rdf-syntax-ns#}RDF' == root.tag:
             edition_builder = import_rdf.parse(root)
@@ -140,7 +142,7 @@ class importapi:
 
 def raise_non_book_marc(marc_record, **kwargs):
     details = 'Item rejected'
-    # Is the item a serial instead of a book?
+    # Is the item a serial instead of a monograph?
     marc_leaders = marc_record.leader()
     if marc_leaders[7] == 's':
         raise BookImportError('item-is-serial', details, **kwargs)
@@ -265,11 +267,13 @@ class ia_importapi(importapi):
                 _ids = [get_subfield(f, id_subfield) for f in rec.read_fields([id_field]) if f and get_subfield(f, id_subfield)]
                 edition['local_id'] = ['urn:%s:%s' % (prefix, _id) for _id in _ids]
 
-            # Don't add the book if the MARC record is a non-book item
+            # Don't add the book if the MARC record is a non-monograph item,
+            # unless it is a serial (etc) for a scanning partner.
             try:
                 raise_non_book_marc(rec, **next_data)
             except BookImportError as e:
-                return self.error(e.error_code, e.error, **e.kwargs)
+                if not (local_id and e.error_code == 'item-is-serial'):
+                    return self.error(e.error_code, e.error, **e.kwargs)
             result = add_book.load(edition)
 
             # Add next_data to the response as location of next record:
@@ -455,11 +459,16 @@ class ils_search:
         d = json.dumps({ "status" : "error", "reason" : reason})
         return web.HTTPError("401 Authorization Required", {"WWW-Authenticate": 'Basic realm="http://openlibrary.org"', "Content-Type": "application/json"}, d)
 
-    def login(self, authstring):
-        if not authstring:
+    def login(self, auth_str):
+        if not auth_str:
             return
-        authstring = authstring.replace("Basic ","")
-        username, password = base64.decodestring(authstring).split(':')
+        auth_str = auth_str.replace("Basic ", "")
+        try:
+            auth_str = base64.decodebytes(bytes(auth_str, 'utf-8'))
+            auth_str = auth_str.decode('utf-8')
+        except AttributeError:
+            auth_str = base64.decodestring(auth_str)
+        username, password = auth_str.split(':')
         accounts.login(username, password)
 
     def prepare_input_data(self, rawdata):
@@ -599,11 +608,16 @@ class ils_cover_upload:
         else:
             return url + "?" + urllib.parse.urlencode(params)
 
-    def login(self, authstring):
-        if not authstring:
+    def login(self, auth_str):
+        if not auth_str:
             raise self.auth_failed("No credentials provided")
-        authstring = authstring.replace("Basic ","")
-        username, password = base64.decodestring(authstring).split(':')
+        auth_str = auth_str.replace("Basic ", "")
+        try:
+            auth_str = base64.decodebytes(bytes(auth_str, 'utf-8'))
+            auth_str = auth_str.decode('utf-8')
+        except AttributeError:
+            auth_str = base64.decodestring(auth_str)
+        username, password = auth_str.split(':')
         accounts.login(username, password)
 
     def POST(self):

@@ -3,9 +3,12 @@
 import copy
 import datetime
 import time
+import hashlib
 import hmac
 import re
-import simplejson
+import requests
+import json
+import six
 import logging
 
 import web
@@ -16,11 +19,9 @@ from infogami.utils.view import public, render_template
 from infogami.infobase.utils import parse_datetime
 
 from openlibrary.core import stats
-from openlibrary.core import msgbroker
 from openlibrary.core import lending
 from openlibrary.core import vendors
 from openlibrary.core import waitinglist
-from openlibrary.core import ab
 from openlibrary.accounts.model import OpenLibraryAccount
 from openlibrary import accounts
 from openlibrary.utils import dateutil
@@ -144,15 +145,15 @@ class borrow(delegate.page):
             raise web.seeother(redirect_url)
 
         if action == 'return':
-            loan_resp = lending.s3_loan_api(edition.ocaid, s3_keys, action='return_loan')
+            lending.s3_loan_api(edition.ocaid, s3_keys, action='return_loan')
             stats.increment('ol.loans.return')
             raise web.seeother(edition.url())
         elif action == 'join-waitinglist':
-            loan_resp = lending.s3_loan_api(edition.ocaid, s3_keys, action='join_waitlist')
+            lending.s3_loan_api(edition.ocaid, s3_keys, action='join_waitlist')
             stats.increment('ol.loans.joinWaitlist')
             raise web.redirect(edition.url())
         elif action == 'leave-waitinglist':
-            loan_resp = lending.s3_loan_api(edition.ocaid, s3_keys, action='leave_waitlist')
+            lending.s3_loan_api(edition.ocaid, s3_keys, action='leave_waitlist')
             stats.increment('ol.loans.leaveWaitlist')
             raise web.redirect(edition.url())
 
@@ -170,7 +171,7 @@ class borrow(delegate.page):
             if not (s3_keys or borrow_access):
                 raise web.seeother(error_redirect)
 
-            loan_resp = lending.s3_loan_api(edition.ocaid, s3_keys, action='%s_book' % borrow_access)
+            lending.s3_loan_api(edition.ocaid, s3_keys, action='%s_book' % borrow_access)
             stats.increment('ol.loans.bookreader')
             stats.increment('ol.loans.%s' % borrow_access)
             action = 'read'
@@ -225,7 +226,7 @@ class borrow_status(delegate.page):
                 'lending_subjects': [lending_subject for lending_subject in subjects]
         }
 
-        output_text = simplejson.dumps( output )
+        output_text = json.dumps( output )
 
         content_type = "application/json"
         if i.callback:
@@ -279,8 +280,6 @@ class borrow_admin(delegate.page):
             loan = lending.get_loan(edition.ocaid)
             if loan and loan['_key'] == i.loan_key:
                 loan.delete()
-        elif i.action == 'update_loan_info':
-            waitinglist.update_waitinglist(edition.ocaid)
         raise web.seeother(web.ctx.path + '/borrow_admin')
 
 class borrow_admin_no_update(delegate.page):
@@ -320,7 +319,7 @@ class ia_loan_status(delegate.page):
 
     def GET(self, itemid):
         d = get_borrow_status(itemid, include_resources=False, include_ia=False)
-        return delegate.RawText(simplejson.dumps(d), content_type="application/json")
+        return delegate.RawText(json.dumps(d), content_type="application/json")
 
 @public
 def get_borrow_status(itemid, include_resources=True, include_ia=True, edition=None):
@@ -378,13 +377,12 @@ class ia_auth(delegate.page):
     def GET(self, item_id):
         i = web.input(_method='GET', callback=None, loan=None, token=None)
 
-        resource_id = 'bookreader:%s' % item_id
         content_type = "application/json"
 
         # check that identifier is valid
 
         user = accounts.get_current_user()
-        auth_json = simplejson.dumps(
+        auth_json = json.dumps(
             get_ia_auth_dict(user, item_id, i.loan, i.token))
 
         output = auth_json
@@ -402,16 +400,16 @@ class borrow_receive_notification(delegate.page):
 
     def GET(self):
         web.header('Content-Type', 'application/json')
-        output = simplejson.dumps({'success': False, 'error': 'Only POST is supported'})
+        output = json.dumps({'success': False, 'error': 'Only POST is supported'})
         return delegate.RawText(output, content_type='application/json')
 
     def POST(self):
         data = web.data()
         try:
-            notify_xml = etree.fromstring(data)
-            output = simplejson.dumps({'success': True})
+            etree.fromstring(data)
+            output = json.dumps({'success': True})
         except Exception as e:
-            output = simplejson.dumps({'success': False, 'error': str(e)})
+            output = json.dumps({'success': False, 'error': str(e)})
         return delegate.RawText(output, content_type='application/json')
 
 
@@ -427,7 +425,7 @@ class ia_borrow_notify(delegate.page):
 
     def POST(self):
         payload = web.data()
-        d = simplejson.loads(payload)
+        d = json.loads(payload)
         identifier = d and d.get('identifier')
         if identifier:
             lending.sync_loan(identifier)
@@ -566,7 +564,7 @@ def get_loan_status(resource_id):
 
     url = '%s/is_loaned_out/%s' % (loanstatus_url, resource_id)
     try:
-        response = simplejson.loads(urllib.request.urlopen(url).read())
+        response = requests.get(url).json()
         if len(response) == 0:
             # No outstanding loans
             return None
@@ -593,8 +591,7 @@ def get_all_loaned_out():
 
     url = '%s/is_loaned_out/' % loanstatus_url
     try:
-        response = simplejson.loads(urllib.request.urlopen(url).read())
-        return response
+        return requests.get(url).json()
     except IOError:
         raise Exception('Loan status server not available')
 
@@ -648,7 +645,6 @@ def _update_loan_status(loan_key, loan, bss_status = None):
         if loan['expiry'] and loan['expiry'] < datetime.datetime.utcnow().isoformat():
             logger.info("%s: loan expired. deleting...", loan_key)
             web.ctx.site.store.delete(loan_key)
-            on_loan_delete(loan)
         return
 
     # Load status from book status server
@@ -677,7 +673,6 @@ def update_loan_from_bss_status(loan_key, loan, status):
         # Was returned, expired, or timed out
         web.ctx.site.store.delete(loan_key)
         logger.info("%s: loan returned or expired or timedout, deleting...", loan_key)
-        on_loan_delete(loan)
         return
 
     # Book has non-returned status
@@ -686,7 +681,6 @@ def update_loan_from_bss_status(loan_key, loan, status):
         loan['expiry'] = status['until']
         web.ctx.site.store[loan_key] = loan
         logger.info("%s: updated expiry to %s", loan_key, loan['expiry'])
-        on_loan_update(loan)
 
 def update_all_loan_status():
     """Update the status of all loans known to Open Library by cross-checking with the book status server.
@@ -718,6 +712,7 @@ def resource_uses_bss(resource_id):
                 return True
     return False
 
+
 def user_can_borrow_edition(user, edition):
     """Returns the type of borrow for which patron is eligible, favoring
     "browse" over "borrow" where available, otherwise return False if
@@ -734,7 +729,7 @@ def user_can_borrow_edition(user, edition):
         if lending_st.get('available_to_browse'):
             return 'browse'
         if lending_st.get('available_to_borrow') or (
-            book_is_waitlistable and is_users_turn_to_borrow(user, edition)):
+                book_is_waitlistable and is_users_turn_to_borrow(user, edition)):
             return 'borrow'
     return False
 
@@ -843,6 +838,26 @@ def get_ia_auth_dict(user, item_id, user_specified_loan_key, access_token):
     }
 
 
+def ia_hash(token_data):
+    access_key = make_access_key()
+    if six.PY3:
+        return hmac.new(
+            access_key,
+            token_data.encode('utf-8'),
+            hashlib.md5
+        ).hexdigest()
+    return hmac.new(access_key, token_data).hexdigest()
+
+
+def make_access_key():
+    try:
+        access_key = config.ia_access_secret
+        return access_key if six.PY2 else access_key.encode('utf-8')
+    except AttributeError:
+        raise RuntimeError(
+            "config value config.ia_access_secret is not present -- check your config"
+        )
+
 def make_ia_token(item_id, expiry_seconds):
     """Make a key that allows a client to access the item on archive.org for the number of
        seconds from now.
@@ -851,22 +866,12 @@ def make_ia_token(item_id, expiry_seconds):
     # $hmac = hash_hmac('md5', "{$id}-{$timestamp}", configGetValue('ol-loan-secret'));
     # return "{$timestamp}-{$hmac}";
 
-    try:
-        access_key = config.ia_access_secret
-    except AttributeError:
-        raise Exception("config value config.ia_access_secret is not present -- check your config")
-
     timestamp = int(time.time() + expiry_seconds)
     token_data = '%s-%d' % (item_id, timestamp)
-
-    token = '%d-%s' % (timestamp, hmac.new(access_key, token_data).hexdigest())
+    token = '%d-%s' % (timestamp, ia_hash(token_data))
     return token
 
 def ia_token_is_current(item_id, access_token):
-    try:
-        access_key = config.ia_access_secret
-    except AttributeError:
-        raise Exception("config value config.ia_access_secret is not present -- check your config")
 
     # Check if token has expired
     try:
@@ -886,7 +891,7 @@ def ia_token_is_current(item_id, access_token):
         return False
 
     expected_data = '%s-%s' % (item_id, token_timestamp)
-    expected_hmac = hmac.new(access_key, expected_data).hexdigest()
+    expected_hmac = ia_hash(expected_data)
 
     if token_hmac == expected_hmac:
         return True
@@ -911,15 +916,5 @@ def make_bookreader_auth_link(loan_key, item_id, book_path, ol_host, ia_userid=N
     }
     return auth_link + urllib.parse.urlencode(params)
 
-def on_loan_update(loan):
-    # update the waiting list and ebook document.
-    waitinglist.update_waitinglist(loan['ocaid'])
-
-def on_loan_delete(loan):
-    # update the waiting list and ebook document.
-    waitinglist.update_waitinglist(loan['ocaid'])
-
-msgbroker.subscribe("loan-created", on_loan_update)
-msgbroker.subscribe("loan-completed", on_loan_delete)
 lending.setup(config)
 vendors.setup(config)

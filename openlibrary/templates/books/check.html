@@ -16,7 +16,7 @@ $var title: $_("Add a book")
 
 <div id="contentBody">
     <div id="searchResults">
-        <ul id="siteSearch" class="list-books">
+        <ul class="list-books">
         $for work in matches:
             <li class="workResult" id="$work.key.split('/')[-1]">
                 <span class="bookcover">
@@ -31,7 +31,7 @@ $var title: $_("Add a book")
                         </span>
                         <span class="resultPublisher">$ungettext('1 edition', '%(count)s editions', work.edition_count, count=commify(work.edition_count))
                         $if work.first_publish_year:
-                            <span "smallest">&bull;</span> $_('First published in %(year)d', year=work.first_publish_year)
+                            <span class="smallest">&bull;</span> $_('First published in %(year)d', year=work.first_publish_year)
                         </span>
                     </span>
                 </span>
@@ -55,7 +55,7 @@ $var title: $_("Add a book")
 <script type="text/javascript">
 <!--
 window.q.push(function() {
-    \$("#siteSearch a").click(function() {
+    \$(".list-books a").click(function() {
         var li = \$(this).parents('li:first');
         \$("input#work").val("/works/" + li.attr("id"));
         \$("form#addbook").submit();
